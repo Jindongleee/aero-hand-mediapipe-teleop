@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+*.task
+firmware_*.bin
+.DS_Store
