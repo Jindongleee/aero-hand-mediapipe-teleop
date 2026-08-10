@@ -15,13 +15,18 @@
   3. send_homing() 재호밍 → 낮음 (손이 자유로워야 함, 최대 175초)
   4. trim_servo(2, -N) 영점 보정 → 중간
 
-각 단계는 사용자 확인 후에만 진행한다. 3, 4 는 되돌리기 어려우므로
+한 번에 한 단계씩 실행한다. 3, 4 는 되돌리기 어려우므로
 1, 2 에서 원인이 잡히면 거기서 멈출 것.
 
 실행:
-  .venv/bin/python thumb_diag.py
+  .venv/bin/python thumb_diag.py                      # 기준선만 (아무것도 안 건드림)
+  .venv/bin/python thumb_diag.py --step extend        # 단계 1
+  .venv/bin/python thumb_diag.py --step release       # 단계 2
+  .venv/bin/python thumb_diag.py --step homing        # 단계 3
+  .venv/bin/python thumb_diag.py --step trim --degrees -10   # 단계 4
 """
 
+import argparse
 import sys
 import time
 from datetime import datetime
@@ -51,6 +56,20 @@ def to_normalized(actuations: list[float]) -> list[float]:
     ]
 
 
+def read_retry(fn, tries: int = 4):
+    """조회 명령을 몇 번 재시도한다.
+
+    응답 프레임이 한 번 어긋나면 그 뒤로도 계속 어긋난 채 읽히므로,
+    실패할 때마다 입력 버퍼를 비우고 다시 요청한다.
+    """
+    for _ in range(tries):
+        value = fn()
+        if value is not None:
+            return value
+        time.sleep(0.1)
+    return None
+
+
 def snapshot(hand, label: str) -> None:
     """현재 위치·전류·온도를 한 줄씩 기록.
 
@@ -59,9 +78,9 @@ def snapshot(hand, label: str) -> None:
     """
     log(f"\n===== {label} =====")
 
-    acts = hand.get_actuations()
-    currs = hand.get_actuator_currents()
-    temps = hand.get_actuator_temperatures()
+    acts = read_retry(hand.get_actuations)
+    currs = read_retry(hand.get_actuator_currents)
+    temps = read_retry(hand.get_actuator_temperatures)
 
     if acts is None:
         log("  위치 읽기 실패 (시리얼 응답 없음)")
@@ -76,13 +95,27 @@ def snapshot(hand, label: str) -> None:
         log(f"  {CH_NAMES[i]:8s} {acts[i]:12.2f} {norms[i]:9.3f} {c:>10s} {t:>7s}{mark}")
 
 
-def ask(question: str) -> bool:
-    """y 를 입력해야만 True. 그 외 전부 중단으로 간주."""
-    try:
-        answer = input(f"\n{question} [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return answer == "y"
+def move_to(hand, target: list[float], seconds: float = 2.5, hz: int = 30) -> None:
+    """현재 위치에서 목표까지 천천히 보간해서 이동한다.
+
+    `send_normalized` 로 목표를 한 번에 보내면 서보가 최대 속도로 달린다.
+    기준선에서 엄지 벌림이 0.899 인데 PAPER 는 0.018 이라, 그대로 보내면
+    전 범위를 한 번에 튄다. 손이 한 대뿐이고 어댑터를 손으로 잡고 있는
+    상황에서는 급격한 동작을 피한다.
+    """
+    acts = read_retry(hand.get_actuations)
+    if acts is None:
+        log("  현재 위치를 못 읽어 램프 없이 바로 전송한다.")
+        send_normalized(hand, target)
+        time.sleep(seconds)
+        return
+
+    start = to_normalized(acts)
+    steps = max(1, int(seconds * hz))
+    for i in range(1, steps + 1):
+        t = i / steps
+        send_normalized(hand, [s + (g - s) * t for s, g in zip(start, target)])
+        time.sleep(1.0 / hz)
 
 
 def step1_extend(hand) -> None:
@@ -99,13 +132,17 @@ def step1_extend(hand) -> None:
 
     target[CH_THUMB_TENDON] = 0.0
     log(f"  전송할 ch2   = 0.000 → actuation {LOWER[2]:.2f} deg")
+    log("  (현재 위치에서 2.5초에 걸쳐 천천히 이동)")
 
-    send_normalized(hand, target)
+    move_to(hand, target)
     time.sleep(1.5)
     snapshot(hand, "단계 1 이후")
 
-    log("\n  >> 엄지 말단이 펴졌는지 눈으로 확인할 것.")
-    log("     펴졌다면 원인은 명령값 범위였고, 여기서 끝. PAPER[2] 를 0.0 으로 바꾸면 됨.")
+    log("\n  >> 두 가지를 볼 것.")
+    log("     1) 엄지 말단이 펴졌는가 (눈으로)")
+    log("     2) TH-TEN 위치가 명령값 근처까지 갔는가, 전류가 다른 채널보다 큰가")
+    log("        위치가 안 따라가고 전류만 크면 = 텐던이 기계적으로 막힌 것")
+    log("        위치는 따라갔는데 여전히 접혀 있으면 = 영점이 어긋난 것 (호밍/트림)")
 
 
 def step2_release(hand) -> None:
@@ -132,10 +169,6 @@ def step3_homing(hand) -> None:
     log("  주의: 호밍 중에는 다른 명령에 응답하지 않는다. 최대 175초.")
     log("        손에 아무것도 닿지 않게 하고, 손가락이 자유롭게 움직일 공간을 확보할 것.")
 
-    if not ask("호밍을 실행할까?"):
-        log("  건너뜀.")
-        return
-
     log("  호밍 중... (최대 175초, 기다릴 것)")
     t0 = time.time()
     hand.send_homing()
@@ -147,43 +180,39 @@ def step3_homing(hand) -> None:
     snapshot(hand, "호밍 + PAPER 이후")
 
 
-def step4_trim(hand) -> None:
-    """ch2 영점을 조금씩 보정한다.
+def step4_trim(hand, degrees: int) -> None:
+    """ch2 영점을 보정한다.
 
     trim_servo 는 SDK GUI 가 쓰는 미세조정 API 다.
-    한 번에 크게 주지 말고 작은 값으로 나눠서, 매번 눈으로 확인하며 진행한다.
+    한 번에 크게 주지 말고 -10도씩 나눠서, 매번 눈으로 확인하며 진행한다.
+    과하면 반대로 늘어진다.
     """
-    log("\n### 단계 4: ch2 영점 보정 (trim_servo)")
-    log("  한 번에 -10도씩 보정하고 매번 확인한다. 과하면 반대로 늘어질 수 있다.")
+    log(f"\n### 단계 4: ch2 영점 보정 (trim_servo, {degrees:+d}도)")
 
-    if not ask("트림을 시작할까?"):
-        log("  건너뜀.")
-        return
+    ack = hand.trim_servo(id=CH_THUMB_TENDON, degrees=degrees)
+    log(f"  trim {degrees:+d}도 적용 → ack={ack}")
 
-    total = 0
-    step_deg = -10
-    while True:
-        ack = hand.trim_servo(id=CH_THUMB_TENDON, degrees=step_deg)
-        total += step_deg
-        log(f"  trim {step_deg:+d}도 적용 (누적 {total:+d}도) → ack={ack}")
+    time.sleep(0.5)
+    send_normalized(hand, PAPER)
+    time.sleep(1.0)
+    snapshot(hand, f"트림 {degrees:+d}도 이후")
 
-        time.sleep(0.5)
-        send_normalized(hand, PAPER)
-        time.sleep(1.0)
-        snapshot(hand, f"트림 누적 {total:+d}도")
-
-        if not ask(f"아직 접혀 있는가? 계속 {step_deg}도 더 보정할까?"):
-            log(f"  트림 종료. 최종 누적 {total:+d}도")
-            break
-
-        if abs(total) >= 90:
-            log("  누적 90도 도달. 이 이상은 하드웨어 문제일 가능성이 높아 중단한다.")
-            break
+    log("\n  >> 아직 접혀 있으면 같은 명령을 한 번 더 실행한다.")
+    log("     누적 -90도를 넘어가면 하드웨어 문제일 가능성이 높으니 멈출 것.")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--step", default="baseline",
+        choices=["baseline", "extend", "release", "homing", "trim"],
+        help="실행할 단계. 기본값 baseline 은 아무것도 건드리지 않고 상태만 읽는다.")
+    parser.add_argument("--degrees", type=int, default=-10,
+                        help="trim 단계에서 적용할 각도 (기본 -10)")
+    args = parser.parse_args()
+
     log("\n" + "=" * 60)
-    log(f"엄지 진단 시작 {datetime.now():%Y-%m-%d %H:%M:%S}")
+    log(f"엄지 진단 [{args.step}] {datetime.now():%Y-%m-%d %H:%M:%S}")
     log("=" * 60)
 
     hand = open_hand()
@@ -192,31 +221,26 @@ def main() -> None:
     try:
         snapshot(hand, "기준선 (연결 직후)")
 
-        log("\n  >> 위 전류값을 볼 것. TH-TEN 전류가 다른 채널보다 높다면")
-        log("     모터가 엄지를 굽힌 채 버티고 있다는 객관적 증거다.")
-
-        if not ask("단계 1 (ch2=0.0, 위험 없음) 을 실행할까?"):
-            return
-        step1_extend(hand)
-
-        if not ask("단계 2 (토크 해제, 위험 없음) 로 넘어갈까?"):
-            return
-        step2_release(hand)
-
-        if not ask("단계 3 (재호밍) 으로 넘어갈까?"):
-            return
-        step3_homing(hand)
-
-        if not ask("단계 4 (트림 보정) 로 넘어갈까?"):
-            return
-        step4_trim(hand)
-
+        if args.step == "baseline":
+            log("\n  >> 위 전류값을 볼 것. TH-TEN 전류가 다른 채널보다 높다면")
+            log("     모터가 엄지를 굽힌 채 버티고 있다는 객관적 증거다.")
+            log("     전류가 전부 0 이면 서보 전원이 안 들어온 것이다 (USB 는 컨트롤러 전용).")
+        elif args.step == "extend":
+            step1_extend(hand)
+        elif args.step == "release":
+            step2_release(hand)
+        elif args.step == "homing":
+            step3_homing(hand)
+        elif args.step == "trim":
+            step4_trim(hand, args.degrees)
     finally:
-        log("\n토크 해제하고 종료.")
-        try:
-            hand.ctrl_torque([0] * N_CHANNELS)
-        except Exception as e:
-            log(f"  토크 해제 실패: {e}")
+        # release 단계는 토크가 풀린 상태를 유지해야 관찰이 가능하다.
+        if args.step != "release":
+            log("\n토크 해제하고 종료.")
+            try:
+                hand.ctrl_torque([0] * N_CHANNELS)
+            except Exception as e:
+                log(f"  토크 해제 실패: {e}")
         hand.close()
         log(f"로그 저장: {LOG_PATH}")
 

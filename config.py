@@ -60,11 +60,19 @@ def detect_port() -> str:
     return os.path.join(SERIAL_BY_ID_DIR, found[0])
 
 
+# SDK 는 시리얼 읽기 타임아웃을 0.01초로 잡는다. GET_POS 같은 조회 명령은
+# 손이 응답할 시간이 그보다 오래 걸릴 때가 있어서, 첫 응답을 놓치면 다음 읽기가
+# 프레임 경계에서 어긋난 채 16바이트를 가져온다 (opcode 가 엉뚱한 값으로 나옴).
+READ_TIMEOUT_S = 0.2
+
+
 def open_hand():
     """AeroHand 인스턴스 생성. 포트는 위 규칙으로 해석."""
     from aero_open_sdk.aero_hand import AeroHand
 
-    return AeroHand(port=resolve_port())
+    hand = AeroHand(port=resolve_port())
+    hand.ser.timeout = READ_TIMEOUT_S
+    return hand
 
 
 # ---------- 액추에이터 채널 ----------
