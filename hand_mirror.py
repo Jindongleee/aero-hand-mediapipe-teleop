@@ -49,7 +49,15 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
 
 EMA_ALPHA = 0.7   # 낮을수록 부드럽고 느림
 SEND_HZ = 30
-CALIB_SECONDS = 8.0
+
+# 캘리브레이션에서 이 폭은 확보해야 "그 관절을 실제로 끝까지 움직였다"고 본다.
+# 굽힘 채널은 (1-cos)/2 라 완전히 접으면 1 에 가까워지므로 0.35 는 대략 90도.
+# 엄지 텐던은 관절 가동범위 자체가 좁아 기준을 낮게 잡는다.
+MIN_SPAN = [0.30, 0.20, 0.05, 0.35, 0.35, 0.35, 0.35]
+
+# 시작 SPACE 가 종료 SPACE 로 다시 읽히는 걸 막고, 최소한의 관측량을 강제한다.
+CALIB_KEY_LOCKOUT_S = 1.0
+CALIB_MIN_FRAMES = 90
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -98,16 +106,14 @@ def run_calibration(cap, landmarker, start_t) -> Calibration:
     (합성 데이터 기준 0.01~0.33) 펴주지 않으면 로봇이 거의 안 움직인다.
     """
     calib = Calibration()
-    t0 = time.time()
-    print("\n캘리브레이션 시작 — 화면 안내대로 손을 움직이세요.")
+    print("\n캘리브레이션 — 화면 안내대로 손을 움직이세요.")
     for s in CALIB_STEPS:
         print("  " + s)
+    print("\n준비되면 창에서 SPACE 를 누르세요 (q 로 취소).")
 
+    # 카메라 각도를 잡고 자세를 준비할 시간을 준다.
+    # 바로 카운트다운을 시작하면 첫 몇 초가 버려지고, 그만큼 관측 범위가 좁아진다.
     while True:
-        elapsed = time.time() - t0
-        if elapsed >= CALIB_SECONDS:
-            break
-
         ok, frame = cap.read()
         if not ok:
             break
@@ -119,34 +125,107 @@ def run_calibration(cap, landmarker, start_t) -> Calibration:
 
         if result.hand_landmarks:
             draw_hand(frame, result.hand_landmarks[0])
-            raw = compute_raw(result.hand_world_landmarks[0])
-            calib.observe(raw)
-            draw_channels(frame, calib.apply(raw) if calib.is_ready()
-                          else np.zeros(N_CHANNELS))
+            cv2.putText(frame, "hand OK", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, "NO HAND - center your hand in frame", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
+        cv2.putText(frame, "SPACE to start calibration", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        for i, s in enumerate(CALIB_STEPS):
+            cv2.putText(frame, s, (10, frame.shape[0] - 90 + i * 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        cv2.imshow("Aero Hand mirror - q to quit", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(" "):
+            break
+        if key == ord("q"):
+            raise RuntimeError("캘리브레이션 취소됨.")
+
+    # 타이머로 끊지 않고 사용자가 끝낼 때까지 관측한다.
+    # 고정 시간으로 하면 동작을 다 못 끝낸 채 좁은 범위가 잡히고, 그 좁은 범위가
+    # 0~1 로 확대되면서 손이 조금만 움직여도 로봇이 풀스윙하는 매핑이 된다.
+    frames = 0
+    calib_t0 = time.time()
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        # 시작 직후 잠깐은 키를 무시한다. 시작 SPACE 가 그대로 종료 SPACE 로
+        # 읽혀서 캘리브레이션이 몇 프레임 만에 끝나는 걸 막는다.
+        locked = (time.time() - calib_t0) < CALIB_KEY_LOCKOUT_S
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = landmarker.detect_for_video(
+            mp_img, int((time.time() - start_t) * 1000))
+
+        if result.hand_landmarks:
+            draw_hand(frame, result.hand_landmarks[0])
+            calib.observe(compute_raw(result.hand_world_landmarks[0]))
+            frames += 1
         else:
             cv2.putText(frame, "NO HAND", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
-        remain = CALIB_SECONDS - elapsed
-        cv2.putText(frame, f"CALIBRATING  {remain:.1f}s", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        step = CALIB_STEPS[min(int(elapsed / CALIB_SECONDS * len(CALIB_STEPS)),
-                               len(CALIB_STEPS) - 1)]
-        cv2.putText(frame, step, (10, frame.shape[0] - 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, "move through the FULL range of each motion",
-                    (10, frame.shape[0] - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # 채널별로 확보된 폭을 실시간으로 보여준다.
+        # 목표에 도달한 채널은 초록, 아직 부족하면 빨강.
+        spans = (calib.hi - calib.lo) if calib.is_ready() \
+            else np.zeros(N_CHANNELS, dtype=np.float32)
+        all_ok = True
+        y = 60
+        for i in range(N_CHANNELS):
+            s = float(spans[i])
+            ratio = min(s / MIN_SPAN[i], 1.0)
+            ok_ch = s >= MIN_SPAN[i]
+            all_ok = all_ok and ok_ch
+            color = (0, 220, 0) if ok_ch else (0, 80, 255)
+            cv2.putText(frame, f"{CH_NAMES[i]:7s} {s:.3f}", (10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+            cv2.rectangle(frame, (180, y - 14), (380, y - 2), (60, 60, 60), 1)
+            cv2.rectangle(frame, (180, y - 14), (180 + int(ratio * 200), y - 2),
+                          color, -1)
+            y += 22
+
+        can_finish = frames >= CALIB_MIN_FRAMES and not locked
+        if not can_finish:
+            header = f"CALIBRATING  {frames}/{CALIB_MIN_FRAMES} frames"
+            color = (0, 165, 255)
+        elif all_ok:
+            header = "ALL CHANNELS OK - SPACE to finish"
+            color = (0, 220, 0)
+        else:
+            header = "SPACE to finish (red bars still short)"
+            color = (0, 0, 255)
+        cv2.putText(frame, header, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    color, 2)
+
+        for i, s in enumerate(CALIB_STEPS):
+            cv2.putText(frame, s, (10, frame.shape[0] - 90 + i * 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         cv2.imshow("Aero Hand mirror - q to quit", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(" ") and can_finish:
             break
+        if key == ord("q") and not locked:
+            raise RuntimeError("캘리브레이션 취소됨.")
 
-    if not calib.is_ready():
+    if not calib.is_ready() or frames == 0:
         raise RuntimeError(
             "캘리브레이션 실패 — 손이 한 번도 검출되지 않았습니다. "
             "조명과 카메라 각도를 확인하세요."
         )
+
+    short = [CH_NAMES[i] for i in range(N_CHANNELS)
+             if calib.hi[i] - calib.lo[i] < MIN_SPAN[i]]
+    if short:
+        print(f"\n주의: 범위가 부족한 채널 — {', '.join(short)}")
+        print("  해당 관절이 실제 가동범위만큼 안 움직였습니다.")
+        print("  좁은 범위를 0~1 로 확대하면 손이 조금만 움직여도 로봇이 크게 움직입니다.")
+        print("  --calibrate 로 다시 잡는 걸 권합니다.")
 
     calib.save()
     print(f"캘리브레이션 저장: {CALIB_PATH}")
