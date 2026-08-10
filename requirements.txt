@@ -2,3 +2,10 @@ opencv-python
 numpy
 mediapipe
 pyserial
+
+# Aero Hand 제어 SDK (TetherIA 공식)
+aero-open-sdk @ git+https://github.com/TetherIA/aero-hand-open.git#subdirectory=sdk
+
+# BC 학습용. 모델이 63->64->3 MLP 라 CPU 로 충분하다:
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch

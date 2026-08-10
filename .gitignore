@@ -4,3 +4,9 @@ __pycache__/
 *.task
 firmware_*.bin
 .DS_Store
+
+# 실행 산출물
+data/
+*.npz
+*.pt
+calibration.json

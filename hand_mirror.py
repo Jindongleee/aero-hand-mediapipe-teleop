@@ -25,11 +25,11 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
-from aero_open_sdk.aero_hand import AeroHand, CTRL_TOR
+from aero_open_sdk.aero_hand import CTRL_TOR
 from poses import send_normalized, PAPER
+from config import open_hand
 
 # ---------- 설정 ----------
-PORT = "/dev/cu.usbmodem101"
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
 
 EMA_ALPHA = 0.7         # 0~1, 낮을수록 부드럽고 느림
@@ -96,8 +96,8 @@ sent = list(ema)                     # 직전 송신값 (slew limit 기준)
 torque_on = True
 
 # ---------- 로봇 연결 ----------
-hand = AeroHand(port=PORT)
-print(f"Aero Hand connected: {PORT}")
+hand = open_hand()
+print(f"Aero Hand connected: {hand.ser.port}")
 send_normalized(hand, PAPER)         # 시작 자세
 time.sleep(0.5)
 

@@ -5,19 +5,19 @@
   - USB 연결됨
 
 실행:
-  source ~/aero-hand/.venv/bin/activate
-  python ~/aero-hand/test_poses.py
+  .venv/bin/python test_poses.py
+
+포트는 SDK 가 자동 탐지한다 (config.py 참고).
 """
 
 import time
-from aero_open_sdk.aero_hand import AeroHand
 
 from poses import POSES, send_normalized
+from config import open_hand
 
-PORT = "/dev/cu.usbmodem101"
 HOLD_SECONDS = 2.0  # 각 포즈 유지 시간
 
-hand = AeroHand(port=PORT)
+hand = open_hand()
 
 try:
     for name in ["paper", "rock", "scissors", "paper"]:

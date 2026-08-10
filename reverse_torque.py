@@ -11,8 +11,8 @@ import sys
 import struct
 from serial import Serial
 
-PORT = "/dev/cu.usbmodem1101"
-BAUD = 921600
+from config import detect_port, BAUD
+
 CTRL_TOR = 0x12
 
 def send_raw(ser, header, payload):
@@ -37,7 +37,7 @@ def main():
         payload = [0] * 7
         payload[servo_id] = raw_val
 
-    ser = Serial(PORT, BAUD, timeout=0.01, write_timeout=0.01)
+    ser = Serial(detect_port(), BAUD, timeout=0.01, write_timeout=0.01)
     ser.reset_input_buffer()
     ser.reset_output_buffer()
 
