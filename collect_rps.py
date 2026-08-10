@@ -45,6 +45,11 @@ KEY_TO_LABEL = {ord("r"): 0, ord("s"): 1, ord("p"): 2}
 TARGET_PER_CLASS = 500
 UNDO_FRAMES = 50
 
+# 라벨 키를 누른 직후에는 아직 포즈를 만드는 중이라 손모양이 라벨과 다르다.
+# 이 구간을 그대로 기록하면 라벨이 틀린 샘플이 섞인다.
+# (실측: 이걸 안 넣었을 때 오분류 10건이 전부 rock 블록의 앞 28프레임에 몰렸다)
+SETTLE_FRAMES = 30
+
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
     (0, 5), (5, 6), (6, 7), (7, 8),
@@ -107,6 +112,7 @@ def main():
         raise RuntimeError("카메라를 열 수 없음. USB 웹캠이 연결되어 있는지 확인.")
 
     active_label = None  # None 이면 녹화 안 함
+    settle_left = 0      # 라벨 전환 직후 버릴 프레임 수
     start_t = time.time()
 
     try:
@@ -127,20 +133,26 @@ def main():
                     # 손이 검출된 프레임만 기록한다. 미검출 프레임을 넣으면
                     # 라벨은 있는데 특징은 쓰레기인 샘플이 섞인다.
                     if active_label is not None:
-                        feat = extract_features(result.hand_world_landmarks[0])
-                        obs.append(feat)
-                        labels.append(active_label)
+                        if settle_left > 0:
+                            settle_left -= 1
+                        else:
+                            feat = extract_features(result.hand_world_landmarks[0])
+                            obs.append(feat)
+                            labels.append(active_label)
 
                 # ---------- HUD ----------
                 counts = np.bincount(
                     np.array(labels, dtype=np.int64) if labels else np.array([], dtype=np.int64),
                     minlength=len(LABEL_NAMES),
                 )
-                state = (
-                    f"REC [{LABEL_NAMES[active_label]}]"
-                    if active_label is not None else "paused"
-                )
-                color = (0, 0, 255) if active_label is not None else (200, 200, 200)
+                if active_label is None:
+                    state, color = "paused", (200, 200, 200)
+                elif settle_left > 0:
+                    state = f"SETTLING [{LABEL_NAMES[active_label]}] {settle_left}"
+                    color = (0, 165, 255)
+                else:
+                    state = f"REC [{LABEL_NAMES[active_label]}]"
+                    color = (0, 0, 255)
                 cv2.putText(frame, state, (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
                 if not detected:
@@ -171,6 +183,8 @@ def main():
                 if key == ord(" "):
                     active_label = None
                 elif key in KEY_TO_LABEL:
+                    if KEY_TO_LABEL[key] != active_label:
+                        settle_left = SETTLE_FRAMES
                     active_label = KEY_TO_LABEL[key]
                 elif key == ord("u"):
                     n = min(UNDO_FRAMES, len(obs))
