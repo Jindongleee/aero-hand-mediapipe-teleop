@@ -10,3 +10,5 @@ data/
 *.npz
 *.pt
 calibration.json
+thumb_diag_log.txt
+Gen1_OPEN_Assembly_Guide.pdf
