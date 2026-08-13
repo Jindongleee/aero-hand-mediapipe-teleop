@@ -11,6 +11,8 @@
   6 = 소지 (pinky)
 """
 
+import config
+
 # ch0(엄지 벌림)은 0.05 미만에서 기계적 한계에 눌린다.
 # 실측: 0.02 를 유지하면 모터가 -110 mA 를 계속 뽑으며 56도까지 올랐고,
 # 0.05 이상에서는 2~14 mA 로 떨어진다. 그래서 하한을 CH0_MIN 으로 둔다.
@@ -27,20 +29,30 @@ POSES = {
 }
 
 
-def send_normalized(hand, normalized: list[float]) -> None:
+def send_normalized(hand, normalized: list[float], side: str | None = None) -> None:
     """슬라이더 정규화 값 (0~1) 7개를 actuation degree로 변환해 손에 전송.
 
     GUI 슬라이더와 동일한 매핑:
       slider 0.0 → actuation_lower_limit
       slider 1.0 → actuation_upper_limit
 
-    ch0 만 CH0_MIN 으로 하한을 건다. 미러링 중에는 캘리브레이션이 0~1 전체를
-    쓰기 때문에 ch0 이 수시로 0 까지 내려가는데, 그 구간에서는 엄지 벌림이
-    기계적 한계에 눌려 모터가 계속 전류를 뽑는다 (실측 -110 mA, 56도).
-    손이 한 대뿐이라 서보를 태우는 쪽이 자세 정확도보다 비싸다.
+    엄지(ch0 벌림 / ch1 굽힘)는 개체·펌웨어(좌/우)마다 편안한 방향이 반대이고,
+    반대쪽 끝은 하드스톱에 눌려 서보가 수 A 를 뽑으며 탄다. 그래서 연결된 손을
+    MAC 으로 판별해 `config.THUMB_SAFE_RANGE` 로 ch0·ch1 을 **재매핑**한다
+    (정규화 [0,1] → 손별 안전 [lo,hi]). 손이 한 대뿐이라 자세 정확도보다
+    서보 보호가 우선. 미측정 손은 레거시 CH0_MIN 하한만 건다.
     """
+    if side is None:
+        side = config.detect_hand_side()
+
     clamped = list(normalized)
-    clamped[0] = max(CH0_MIN, clamped[0])
+    rng = config.THUMB_SAFE_RANGE.get(side)
+    if rng is not None:
+        ch0_lo, ch0_hi, ch1_lo, ch1_hi = rng
+        clamped[0] = ch0_lo + clamped[0] * (ch0_hi - ch0_lo)
+        clamped[1] = ch1_lo + clamped[1] * (ch1_hi - ch1_lo)
+    else:
+        clamped[0] = max(CH0_MIN, clamped[0])   # 레거시 (미측정 손)
 
     actuations = [
         hand.actuation_lower_limits[i]

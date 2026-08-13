@@ -102,3 +102,45 @@ CH_NAMES = [
 
 SLEW_LIMIT_SAFE = 0.05   # 첫 구동 / BC 정책 검증용
 SLEW_LIMIT_NORMAL = 0.15  # 동작 확인 후
+
+
+# ---------- 손별 엄지 안전 범위 (스톨 방지) ----------
+# 엄지 벌림/굽힘(ch0/ch1)은 개체·펌웨어(좌/우)마다 편안한 방향이 반대다.
+# 정규화 명령 [0,1] 을 아래 (lo,hi) 로 재매핑해서 스톨존을 아예 안 건드린다.
+#
+# 오른손(2026-08-13 실측, GUI 스윕):
+#   ch0 는 0.68→0mA(편안), 0.60→-500, 0.48→-3126mA(하드 스톨). → 하한 ~0.6
+#   ch1 는 0.17→-572, 0.145→-1703mA(스톨). → 하한 ~0.16
+#   즉 ch0·ch1 이 높아야 편안. 낮추면 수 A 로 서보를 태운다.
+# 왼손(LEFT 펌웨어): 방향이 반대(낮은쪽 편안)로 추정되나 정밀 실측 전 → 미측정.
+
+# 보드 MAC → 좌/우
+HAND_MAC_SIDE = {
+    "90:70:69:12:D2:0C": "right",
+    "98:A3:16:F7:51:14": "left",
+}
+
+# 측정된 손만 등록. (ch0_lo, ch0_hi, ch1_lo, ch1_hi)
+# lo>hi 면 방향 반전(사람 손과 반대로 움직일 때). 안전범위는 min/max 로 유지됨.
+THUMB_SAFE_RANGE = {
+    # ch0: 정방향 [0.70,1.00]. ch1: 실물서 반대로 확인(2026-08-13) → 반전 [1.00,0.30].
+    "right": (0.70, 1.00, 1.00, 0.30),
+    # "left": 왼손 실측 후 채울 것 (오른손과 반대 방향으로 추정)
+}
+
+
+def detect_hand_side() -> str | None:
+    """연결된 보드 MAC 으로 좌/우 판별. 못 찾으면 None (→ 레거시 클램프)."""
+    if not os.path.isdir(SERIAL_BY_ID_DIR):
+        return None
+    try:
+        entries = os.listdir(SERIAL_BY_ID_DIR)
+    except OSError:
+        return None
+    for d in entries:
+        if ESP32_PREFIX not in d:
+            continue
+        for mac, side in HAND_MAC_SIDE.items():
+            if mac in d:
+                return side
+    return None
